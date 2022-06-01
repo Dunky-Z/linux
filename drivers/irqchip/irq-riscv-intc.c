@@ -111,33 +111,16 @@ static struct fwnode_handle *riscv_intc_hwnode(void)
 	return intc_domain->fwnode;
 }
 
-static int __init riscv_intc_init(struct device_node *node,
-				  struct device_node *parent)
+static int __init riscv_intc_probe(struct fwnode_handle *fn)
 {
 	int rc, nr_irqs;
-	unsigned long hartid;
-
-	rc = riscv_of_parent_hartid(node, &hartid);
-	if (rc < 0) {
-		pr_warn("unable to find hart id for %pOF\n", node);
-		return 0;
-	}
-
-	/*
-	 * The DT will have one INTC DT node under each CPU (or HART)
-	 * DT node so riscv_intc_init() function will be called once
-	 * for each INTC DT node. We only need to do INTC initialization
-	 * for the INTC DT node belonging to boot CPU (or boot HART).
-	 */
-	if (riscv_hartid_to_cpuid(hartid) != smp_processor_id())
-		return 0;
 
 	nr_irqs = BITS_PER_LONG;
 	if (riscv_isa_extension_available(NULL, SxAIA) && BITS_PER_LONG == 32)
 		nr_irqs = nr_irqs * 2;
 
-	intc_domain = irq_domain_add_linear(node, nr_irqs,
-					    &riscv_intc_domain_ops, NULL);
+	intc_domain = irq_domain_create_linear(fn, nr_irqs,
+					       &riscv_intc_domain_ops, NULL);
 	if (!intc_domain) {
 		pr_err("unable to add IRQ domain\n");
 		return -ENXIO;
@@ -161,4 +144,75 @@ static int __init riscv_intc_init(struct device_node *node,
 	return 0;
 }
 
+static int __init riscv_intc_init(struct device_node *node,
+				  struct device_node *parent)
+{
+	int rc;
+	unsigned long hartid;
+
+	rc = riscv_of_parent_hartid(node, &hartid);
+	if (rc < 0) {
+		pr_warn("unable to find hart id for %pOF\n", node);
+		return 0;
+	}
+
+	/*
+	 * The DT will have one INTC DT node under each CPU (or HART)
+	 * DT node so riscv_intc_init() function will be called once
+	 * for each INTC DT node. We only need to do INTC initialization
+	 * for the INTC DT node belonging to boot CPU (or boot HART).
+	 */
+	if (riscv_hartid_to_cpuid(hartid) != smp_processor_id())
+		return 0;
+
+	rc = riscv_intc_probe(of_node_to_fwnode(node));
+	if (rc) {
+		pr_err("failed to initialize INTC\n");
+		return rc;
+	}
+
+	return 0;
+}
+
 IRQCHIP_DECLARE(riscv, "riscv,cpu-intc", riscv_intc_init);
+
+#ifdef CONFIG_ACPI
+
+static int __init
+riscv_intc_acpi_init(union acpi_subtable_headers *header,
+		     const unsigned long end)
+{
+	int rc;
+	struct fwnode_handle *fn;
+	struct acpi_madt_rintc *rintc;
+
+	rintc = (struct acpi_madt_rintc *)header;
+
+	/*
+	 * The ACPI MADT will have one INTC for each CPU (or HART)
+	 * so riscv_intc_acpi_init() function will be called once
+	 * for each INTC. We only need to do INTC initialization
+	 * for the INTC belonging to the boot CPU (or boot HART).
+	 */
+	if (riscv_hartid_to_cpuid(rintc->hartid) != smp_processor_id())
+		return 0;
+
+	fn = irq_domain_alloc_named_fwnode("RISCV-INTC");
+	WARN_ON(fn == NULL);
+	if (!fn) {
+		pr_err("unable to allocate INTC FW node\n");
+		return -1;
+	}
+
+	rc = riscv_intc_probe(fn);
+	if (rc) {
+		pr_err("failed to initialize INTC\n");
+		return rc;
+	}
+
+	return 0;
+}
+
+IRQCHIP_ACPI_DECLARE(riscv_intc, ACPI_MADT_TYPE_RINTC,
+		     NULL, 1, riscv_intc_acpi_init);
+#endif
