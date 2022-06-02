@@ -4,6 +4,7 @@
  * Copyright (C) 2017 SiFive
  */
 
+#include <linux/acpi.h>
 #include <linux/of_clk.h>
 #include <linux/clocksource.h>
 #include <linux/delay.h>
@@ -31,9 +32,20 @@ static void of_time_init(void)
 	timer_probe();
 }
 
+static void acpi_time_init(void)
+{
+	of_clk_init(NULL);
+	timer_probe();
+
+	lpj_fine = riscv_timebase / HZ;
+}
+
 void __init time_init(void)
 {
-	of_time_init();
+	if (acpi_disabled)
+		of_time_init();
+	else
+		acpi_time_init();
 }
 
 void clocksource_arch_init(struct clocksource *cs)
