@@ -5,6 +5,14 @@
 #include <linux/sched.h>
 #include <asm/sbi.h>
 #include <asm/mmu_context.h>
+#include <asm/hwcap.h>
+
+static unsigned long tlb_flush_all_threshold __read_mostly = PTRS_PER_PTE;
+
+static __always_inline bool has_svinval(void)
+{
+	return static_branch_unlikely(&riscv_isa_ext_keys[RISCV_ISA_EXT_KEY_SVINVAL]);
+}
 
 static inline void local_flush_tlb_all_asid(unsigned long asid)
 {
@@ -23,22 +31,110 @@ static inline void local_flush_tlb_page_asid(unsigned long addr,
 			: "memory");
 }
 
+static inline void local_sfence_inval_ir(void)
+{
+	/*
+	 * SFENCE.INVAL.IR
+	 * 0001100 00001 00000 000 00000 1110011
+	 */
+	asm volatile (".word 0x18100073" ::: "memory");
+}
+
+static inline void local_sfence_w_inval(void)
+{
+	/*
+	 * SFENCE.W.INVAL
+	 * 0001100 00000 00000 000 00000 1110011
+	 */
+	asm volatile (".word 0x18000073" ::: "memory");
+}
+
+static inline void local_sinval_vma_asid(unsigned long vma, unsigned long asid)
+{
+	/*
+	 * rs1 = a0 (VMA)
+	 * rs2 = a1 (asid)
+	 * SINVAL.VMA a0, a1
+	 * 0001011 01011 01010 000 00000 1110011
+	 */
+	asm volatile ("add a0, %0, zero\n"
+			"add a1, %1, zero\n"
+			".word 0x16B50073\n"
+			:: "r" (vma), "r" (asid)
+			: "a0", "a1", "memory");
+}
+
+static inline void local_sinval_vma(unsigned long vma)
+{
+	/*
+	 * rs1 = a0 (VMA)
+	 * rs2 = 0
+	 * SINVAL.VMA a0
+	 * 0001011 00000 01010 000 00000 1110011
+	 */
+	asm volatile ("add a0, %0, zero\n"
+			".word 0x16050073\n"
+			:: "r" (vma) : "a0", "memory");
+}
+
 static inline void local_flush_tlb_range(unsigned long start,
 		unsigned long size, unsigned long stride)
 {
-	if (size <= stride)
-		local_flush_tlb_page(start);
-	else
+	if ((size / stride) <= tlb_flush_all_threshold) {
+		if (has_svinval()) {
+			local_sfence_w_inval();
+			while (size) {
+				local_sinval_vma(start);
+				start += stride;
+				if (size > stride)
+					size -= stride;
+				else
+					size = 0;
+			}
+			local_sfence_inval_ir();
+		} else {
+			while (size) {
+				local_flush_tlb_page(start);
+				start += stride;
+				if (size > stride)
+					size -= stride;
+				else
+					size = 0;
+			}
+		}
+	} else {
 		local_flush_tlb_all();
+	}
 }
 
 static inline void local_flush_tlb_range_asid(unsigned long start,
 		unsigned long size, unsigned long stride, unsigned long asid)
 {
-	if (size <= stride)
-		local_flush_tlb_page_asid(start, asid);
-	else
+	if ((size / stride) <= tlb_flush_all_threshold) {
+		if (has_svinval()) {
+			local_sfence_w_inval();
+			while (size) {
+				local_sinval_vma_asid(start, asid);
+				start += stride;
+				if (size > stride)
+					size -= stride;
+				else
+					size = 0;
+			}
+			local_sfence_inval_ir();
+		} else {
+			while (size) {
+				local_flush_tlb_page_asid(start, asid);
+				start += stride;
+				if (size > stride)
+					size -= stride;
+				else
+					size = 0;
+			}
+		}
+	} else {
 		local_flush_tlb_all_asid(asid);
+	}
 }
 
 static void __ipi_flush_tlb_all(void *info)
