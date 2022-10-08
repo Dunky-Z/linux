@@ -14,6 +14,7 @@ kvm-y += vm.o
 kvm-y += vmid.o
 kvm-y += tlb.o
 kvm-y += mmu.o
+kvm-y += nacl.o
 kvm-y += vcpu.o
 kvm-y += vcpu_exit.o
 kvm-y += vcpu_fp.o
