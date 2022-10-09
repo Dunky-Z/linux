@@ -1059,18 +1059,38 @@ static void kvm_riscv_update_hvip(struct kvm_vcpu *vcpu)
  */
 static void noinstr kvm_riscv_vcpu_enter_exit(struct kvm_vcpu *vcpu)
 {
+	void *nshmem;
 	struct kvm_cpu_context *gcntx = &vcpu->arch.guest_context;
 	struct kvm_cpu_context *hcntx = &vcpu->arch.host_context;
 
 	guest_state_enter_irqoff();
 
-	hcntx->hstatus = nacl_csr_swap(CSR_HSTATUS, gcntx->hstatus);
+	if (kvm_riscv_nacl_available()) {
+		nshmem = nacl_shmem();
+		hcntx->hstatus = nacl_shmem_csr_swap(nshmem,
+						CSR_HSTATUS, gcntx->hstatus);
 
-	nacl_sync_csr(-1UL);
+		nacl_shmem_scratch_write_longs(nshmem,
+					       SBI_NACL_SRET_SCRATCH_X(1),
+					       &gcntx->ra,
+					       SBI_NACL_SRET_SCRATCH_X_LAST);
+		nacl_shmem_scratch_write_long(nshmem,
+					      SBI_NACL_SRET_SCRATCH_HSTATUS,
+					      hcntx->hstatus);
 
-	__kvm_riscv_switch_to(&vcpu->arch);
+		__kvm_riscv_nacl_switch_to(&vcpu->arch, SBI_EXT_NACL,
+					   SBI_EXT_NACL_SYNC_SRET,
+					   SBI_NACL_SRET_FLAG_VMEXIT_HSTATUS);
 
-	gcntx->hstatus = csr_swap(CSR_HSTATUS, hcntx->hstatus);
+		gcntx->hstatus = nacl_shmem_scratch_read_long(nshmem,
+					SBI_NACL_SRET_SCRATCH_HSTATUS);
+	} else {
+		hcntx->hstatus = csr_swap(CSR_HSTATUS, gcntx->hstatus);
+
+		__kvm_riscv_switch_to(&vcpu->arch);
+
+		gcntx->hstatus = csr_swap(CSR_HSTATUS, hcntx->hstatus);
+	}
 
 	vcpu->arch.last_exit_cpu = vcpu->cpu;
 	guest_state_exit_irqoff();
