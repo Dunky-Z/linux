@@ -18,8 +18,8 @@
 #include <linux/sched/signal.h>
 #include <linux/fs.h>
 #include <linux/kvm_host.h>
-#include <asm/csr.h>
 #include <asm/cacheflush.h>
+#include <asm/kvm_nacl.h>
 #include <asm/hwcap.h>
 
 const struct _kvm_stats_desc kvm_vcpu_stats_desc[] = {
@@ -766,10 +766,10 @@ void kvm_riscv_vcpu_sync_interrupts(struct kvm_vcpu *vcpu)
 	struct kvm_vcpu_csr *csr = &vcpu->arch.guest_csr;
 
 	/* Read current HVIP CSRs */
-	csr->vsie = csr_read(CSR_VSIE);
+	csr->vsie = nacl_csr_read(CSR_VSIE);
 
 	/* Sync-up HVIP.VSSIP bit changes does by Guest */
-	hvip = csr_read(CSR_HVIP);
+	hvip = nacl_csr_read(CSR_HVIP);
 	if ((csr->hvip ^ hvip) & (1UL << IRQ_VS_SOFT)) {
 		if (hvip & (1UL << IRQ_VS_SOFT)) {
 			if (!test_and_set_bit(IRQ_VS_SOFT,
@@ -909,25 +909,39 @@ static void kvm_riscv_vcpu_update_config(const unsigned long *isa)
 	if (riscv_isa_extension_available(isa, ZICBOM))
 		henvcfg |= (ENVCFG_CBIE | ENVCFG_CBCFE);
 
-	csr_write(CSR_HENVCFG, henvcfg);
+	nacl_csr_write(CSR_HENVCFG, henvcfg);
 #ifdef CONFIG_32BIT
-	csr_write(CSR_HENVCFGH, henvcfg >> 32);
+	nacl_csr_write(CSR_HENVCFGH, henvcfg >> 32);
 #endif
 }
 
 void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 {
+	void *nshmem;
 	struct kvm_vcpu_csr *csr = &vcpu->arch.guest_csr;
 
-	csr_write(CSR_VSSTATUS, csr->vsstatus);
-	csr_write(CSR_VSIE, csr->vsie);
-	csr_write(CSR_VSTVEC, csr->vstvec);
-	csr_write(CSR_VSSCRATCH, csr->vsscratch);
-	csr_write(CSR_VSEPC, csr->vsepc);
-	csr_write(CSR_VSCAUSE, csr->vscause);
-	csr_write(CSR_VSTVAL, csr->vstval);
-	csr_write(CSR_HVIP, csr->hvip);
-	csr_write(CSR_VSATP, csr->vsatp);
+	if (kvm_riscv_nacl_available()) {
+		nshmem = nacl_shmem();
+		nacl_shmem_csr_write(nshmem, CSR_VSSTATUS, csr->vsstatus);
+		nacl_shmem_csr_write(nshmem, CSR_VSIE, csr->vsie);
+		nacl_shmem_csr_write(nshmem, CSR_VSTVEC, csr->vstvec);
+		nacl_shmem_csr_write(nshmem, CSR_VSSCRATCH, csr->vsscratch);
+		nacl_shmem_csr_write(nshmem, CSR_VSEPC, csr->vsepc);
+		nacl_shmem_csr_write(nshmem, CSR_VSCAUSE, csr->vscause);
+		nacl_shmem_csr_write(nshmem, CSR_VSTVAL, csr->vstval);
+		nacl_shmem_csr_write(nshmem, CSR_HVIP, csr->hvip);
+		nacl_shmem_csr_write(nshmem, CSR_VSATP, csr->vsatp);
+	} else {
+		csr_write(CSR_VSSTATUS, csr->vsstatus);
+		csr_write(CSR_VSIE, csr->vsie);
+		csr_write(CSR_VSTVEC, csr->vstvec);
+		csr_write(CSR_VSSCRATCH, csr->vsscratch);
+		csr_write(CSR_VSEPC, csr->vsepc);
+		csr_write(CSR_VSCAUSE, csr->vscause);
+		csr_write(CSR_VSTVAL, csr->vstval);
+		csr_write(CSR_HVIP, csr->hvip);
+		csr_write(CSR_VSATP, csr->vsatp);
+	}
 
 	kvm_riscv_vcpu_update_config(vcpu->arch.isa);
 
@@ -946,6 +960,7 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 
 void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
 {
+	void *nshmem;
 	struct kvm_vcpu_csr *csr = &vcpu->arch.guest_csr;
 
 	vcpu->cpu = -1;
@@ -958,15 +973,28 @@ void kvm_arch_vcpu_put(struct kvm_vcpu *vcpu)
 
 	kvm_riscv_vcpu_timer_save(vcpu);
 
-	csr->vsstatus = csr_read(CSR_VSSTATUS);
-	csr->vsie = csr_read(CSR_VSIE);
-	csr->vstvec = csr_read(CSR_VSTVEC);
-	csr->vsscratch = csr_read(CSR_VSSCRATCH);
-	csr->vsepc = csr_read(CSR_VSEPC);
-	csr->vscause = csr_read(CSR_VSCAUSE);
-	csr->vstval = csr_read(CSR_VSTVAL);
-	csr->hvip = csr_read(CSR_HVIP);
-	csr->vsatp = csr_read(CSR_VSATP);
+	if (kvm_riscv_nacl_available()) {
+		nshmem = nacl_shmem();
+		csr->vsstatus = nacl_shmem_csr_read(nshmem, CSR_VSSTATUS);
+		csr->vsie = nacl_shmem_csr_read(nshmem, CSR_VSIE);
+		csr->vstvec = nacl_shmem_csr_read(nshmem, CSR_VSTVEC);
+		csr->vsscratch = nacl_shmem_csr_read(nshmem, CSR_VSSCRATCH);
+		csr->vsepc = nacl_shmem_csr_read(nshmem, CSR_VSEPC);
+		csr->vscause = nacl_shmem_csr_read(nshmem, CSR_VSCAUSE);
+		csr->vstval = nacl_shmem_csr_read(nshmem, CSR_VSTVAL);
+		csr->hvip = nacl_shmem_csr_read(nshmem, CSR_HVIP);
+		csr->vsatp = nacl_shmem_csr_read(nshmem, CSR_VSATP);
+	} else {
+		csr->vsstatus = csr_read(CSR_VSSTATUS);
+		csr->vsie = csr_read(CSR_VSIE);
+		csr->vstvec = csr_read(CSR_VSTVEC);
+		csr->vsscratch = csr_read(CSR_VSSCRATCH);
+		csr->vsepc = csr_read(CSR_VSEPC);
+		csr->vscause = csr_read(CSR_VSCAUSE);
+		csr->vstval = csr_read(CSR_VSTVAL);
+		csr->hvip = csr_read(CSR_HVIP);
+		csr->vsatp = csr_read(CSR_VSATP);
+	}
 }
 
 static void kvm_riscv_check_vcpu_requests(struct kvm_vcpu *vcpu)
@@ -1018,7 +1046,7 @@ static void kvm_riscv_update_hvip(struct kvm_vcpu *vcpu)
 {
 	struct kvm_vcpu_csr *csr = &vcpu->arch.guest_csr;
 
-	csr_write(CSR_HVIP, csr->hvip);
+	nacl_csr_write(CSR_HVIP, csr->hvip);
 	kvm_riscv_vcpu_aia_update_hvip(vcpu);
 }
 
@@ -1036,7 +1064,9 @@ static void noinstr kvm_riscv_vcpu_enter_exit(struct kvm_vcpu *vcpu)
 
 	guest_state_enter_irqoff();
 
-	hcntx->hstatus = csr_swap(CSR_HSTATUS, gcntx->hstatus);
+	hcntx->hstatus = nacl_csr_swap(CSR_HSTATUS, gcntx->hstatus);
+
+	nacl_sync_csr(-1UL);
 
 	__kvm_riscv_switch_to(&vcpu->arch);
 
@@ -1163,8 +1193,8 @@ int kvm_arch_vcpu_ioctl_run(struct kvm_vcpu *vcpu)
 		trap.sepc = vcpu->arch.guest_context.sepc;
 		trap.scause = csr_read(CSR_SCAUSE);
 		trap.stval = csr_read(CSR_STVAL);
-		trap.htval = csr_read(CSR_HTVAL);
-		trap.htinst = csr_read(CSR_HTINST);
+		trap.htval = nacl_csr_read(CSR_HTVAL);
+		trap.htinst = nacl_csr_read(CSR_HTINST);
 
 		/* Syncup interrupts state with HW */
 		kvm_riscv_vcpu_sync_interrupts(vcpu);
