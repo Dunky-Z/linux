@@ -896,7 +896,7 @@ int kvm_arch_vcpu_ioctl_set_guest_debug(struct kvm_vcpu *vcpu,
 	return -EINVAL;
 }
 
-static void kvm_riscv_vcpu_update_config(const unsigned long *isa)
+static u64 kvm_riscv_vcpu_get_henvcfg(const unsigned long *isa)
 {
 	u64 henvcfg = 0;
 
@@ -909,15 +909,13 @@ static void kvm_riscv_vcpu_update_config(const unsigned long *isa)
 	if (riscv_isa_extension_available(isa, ZICBOM))
 		henvcfg |= (ENVCFG_CBIE | ENVCFG_CBCFE);
 
-	nacl_csr_write(CSR_HENVCFG, henvcfg);
-#ifdef CONFIG_32BIT
-	nacl_csr_write(CSR_HENVCFGH, henvcfg >> 32);
-#endif
+	return henvcfg;
 }
 
 void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 {
 	void *nshmem;
+	u64 henvcfg = kvm_riscv_vcpu_get_henvcfg(vcpu->arch.isa);
 	struct kvm_vcpu_csr *csr = &vcpu->arch.guest_csr;
 
 	if (kvm_riscv_nacl_available()) {
@@ -931,6 +929,10 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 		nacl_shmem_csr_write(nshmem, CSR_VSTVAL, csr->vstval);
 		nacl_shmem_csr_write(nshmem, CSR_HVIP, csr->hvip);
 		nacl_shmem_csr_write(nshmem, CSR_VSATP, csr->vsatp);
+		nacl_shmem_csr_write(nshmem, CSR_HENVCFG, henvcfg);
+#ifdef CONFIG_32BIT
+		nacl_shmem_csr_write(nshmem, CSR_HENVCFGH, henvcfg >> 32);
+#endif
 	} else {
 		csr_write(CSR_VSSTATUS, csr->vsstatus);
 		csr_write(CSR_VSIE, csr->vsie);
@@ -941,9 +943,11 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 		csr_write(CSR_VSTVAL, csr->vstval);
 		csr_write(CSR_HVIP, csr->hvip);
 		csr_write(CSR_VSATP, csr->vsatp);
+		csr_write(CSR_HENVCFG, henvcfg);
+#ifdef CONFIG_32BIT
+		csr_write(CSR_HENVCFGH, henvcfg >> 32);
+#endif
 	}
-
-	kvm_riscv_vcpu_update_config(vcpu->arch.isa);
 
 	kvm_riscv_gstage_update_hgatp(vcpu);
 
