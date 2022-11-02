@@ -77,6 +77,7 @@ static inline u32 get_acpi_id_for_cpu(int cpu)
 #define ACPI_TABLE_FADT_MINOR_REVISION 1
 
 int acpi_get_riscv_isa(struct acpi_table_header *table, unsigned int cpu, char *isa);
+int acpi_get_cbom_block_size(struct acpi_table_header *table, unsigned int cpu, u32 *blk_size);
 
 #endif
 
