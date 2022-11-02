@@ -3,7 +3,9 @@
  * Copyright (C) 2017 SiFive
  */
 
+#include <linux/acpi.h>
 #include <linux/of.h>
+#include <linux/of_device.h>
 #include <asm/cacheflush.h>
 
 #ifdef CONFIG_SMP
@@ -94,23 +96,41 @@ EXPORT_SYMBOL_GPL(riscv_cbom_block_size);
 
 void riscv_init_cbom_blocksize(void)
 {
-	struct device_node *node;
+	static struct acpi_table_header *rhct;
 	unsigned long cbom_hartid;
 	u32 val, probed_block_size;
+	acpi_status status;
+	unsigned int cpu;
 	int ret;
 
 	probed_block_size = 0;
-	for_each_of_cpu_node(node) {
+
+#ifdef CONFIG_ACPI
+	if (!acpi_disabled) {
+		status = acpi_get_table(ACPI_SIG_RHCT, 0, &rhct);
+		if (ACPI_FAILURE(status))
+			return;
+	}
+#endif
+	for_each_possible_cpu(cpu) {
 		unsigned long hartid;
 
-		ret = riscv_of_processor_hartid(node, &hartid);
-		if (ret)
-			continue;
+		if (acpi_disabled) {
+			struct device_node *node;
+			node = of_cpu_device_node_get(cpu);
+			if (node)
+				ret = riscv_of_processor_hartid(node, &hartid);
+			if (ret)
+				continue;
 
-		/* set block-size for cbom extension if available */
-		ret = of_property_read_u32(node, "riscv,cbom-block-size", &val);
-		if (ret)
-			continue;
+			/* set block-size for cbom extension if available */
+			ret = of_property_read_u32(node, "riscv,cbom-block-size", &val);
+			if (ret)
+				continue;
+		} else {
+			ret = acpi_get_cbom_block_size(rhct, get_acpi_id_for_cpu(cpu), &val);
+			hartid = acpi_get_madt_rintc(cpu)->hartid;
+		}
 
 		if (!probed_block_size) {
 			probed_block_size = val;
@@ -121,6 +141,11 @@ void riscv_init_cbom_blocksize(void)
 					cbom_hartid, hartid);
 		}
 	}
+
+#ifdef CONFIG_ACPI
+	if (!acpi_disabled)
+		acpi_put_table((struct acpi_table_header *)rhct);
+#endif
 
 	if (probed_block_size)
 		riscv_cbom_block_size = probed_block_size;
