@@ -1413,6 +1413,7 @@ static int __init acpi_init(void)
 	}
 
 	pci_mmcfg_late_init();
+	acpi_arch_device_init();
 	acpi_iort_init();
 	acpi_viot_early_init();
 	acpi_hest_init();
