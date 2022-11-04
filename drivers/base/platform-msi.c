@@ -349,3 +349,44 @@ int platform_msi_device_domain_alloc(struct irq_domain *domain, unsigned int vir
 
 	return msi_domain_populate_irqs(domain->parent, dev, virq, nr_irqs, &data->arg);
 }
+
+#ifdef CONFIG_ACPI
+static struct fwnode_handle *(*platform_msi_get_fwnode_cb)(struct device *dev);
+
+/**
+ * platform_msi_register_fwnode_provider - Register callback to retrieve fwnode
+ * @fn:       Callback matching a device to a fwnode that identifies a PCI
+ *            MSI domain.
+ *
+ * This should be called by irqchip driver, which is the parent of
+ * the MSI domain to provide callback interface to query fwnode.
+ */
+void
+platform_msi_register_fwnode_provider(struct fwnode_handle *(*fn)(struct device *))
+{
+	platform_msi_get_fwnode_cb = fn;
+}
+
+/**
+ * platform_acpi_msi_domain - Retrieve MSI domain of a PCI host bridge
+ * @pdev:      The platform device.
+ *
+ * This function uses the callback function registered by
+ * platform_msi_register_fwnode_provider() to retrieve the irq_domain with
+ * type DOMAIN_BUS_PCI_MSI of the specified host bridge bus.
+ * This returns NULL on error or when the domain is not found.
+ */
+struct irq_domain *platform_acpi_msi_domain(struct device *dev)
+{
+	struct fwnode_handle *fwnode;
+
+	if (!platform_msi_get_fwnode_cb)
+		return NULL;
+
+	fwnode = platform_msi_get_fwnode_cb(dev);
+	if (!fwnode)
+		return NULL;
+
+	return irq_find_matching_fwnode(fwnode, DOMAIN_BUS_PLATFORM_MSI);
+}
+#endif
