@@ -1216,3 +1216,243 @@ static int __init imsic_dt_init(struct device_node *node,
 	return imsic_init(&ops, &node->fwnode, NULL);
 }
 IRQCHIP_DECLARE(riscv_imsic, "riscv,imsics", imsic_dt_init);
+
+#ifdef CONFIG_ACPI
+struct fwnode_handle *imsic_fwnode;
+
+struct imsic_rintc_mmio {
+	u64 base;
+	u32 size;
+};
+
+static struct
+{
+	u32 nr_rintc;
+	struct imsic_rintc_mmio *mmio;
+} imsic_acpi_data __initdata;
+
+static void __init
+imsic_acpi_register_imsic_mmio(u64 base_addr, u32 size)
+{
+	static int count;
+
+	imsic_acpi_data.mmio[count].base = base_addr;
+	imsic_acpi_data.mmio[count].size = size;
+	count++;
+}
+
+static int __init
+imsic_acpi_parse_madt_rintc(union acpi_subtable_headers *header,
+			 const unsigned long end)
+{
+	struct acpi_madt_rintc *rintc =
+				(struct acpi_madt_rintc *)header;
+
+	imsic_acpi_register_imsic_mmio(rintc->imsic_addr, rintc->imsic_size);
+	return 0;
+}
+
+static int __init imsic_acpi_collect_imsic_info(void)
+{
+
+	/* Collect individual IMSIC information */
+	if (acpi_table_parse_madt(ACPI_MADT_TYPE_RINTC, imsic_acpi_parse_madt_rintc, 0) > 0)
+		return 0;
+
+	pr_info("No valid RINTC entries exist\n");
+	return -ENODEV;
+}
+
+static int __init imsic_acpi_match_imsic(union acpi_subtable_headers *header,
+					 const unsigned long end)
+{
+	struct acpi_madt_rintc *rintc;
+
+	rintc = (struct acpi_madt_rintc *)header;
+	if (rintc->version < 2)
+		return -1;
+
+	return 0;
+}
+
+static int __init imsic_acpi_count_rintc(void)
+{
+	int count;
+
+	/*
+	 * Count how many RINTC are there
+	 */
+	count = acpi_table_parse_madt(ACPI_MADT_TYPE_RINTC,
+				      imsic_acpi_match_imsic, 0);
+
+	return count;
+}
+
+static bool __init acpi_validate_rintc(struct acpi_subtable_header *header,
+				       struct acpi_probe_entry *ape)
+{
+	int count;
+
+	count = imsic_acpi_count_rintc();
+	if (count <= 0)
+		return false;
+
+	imsic_acpi_data.nr_rintc = count;
+
+	return true;
+}
+
+static int imsic_acpi_init_imsic_mmio(void)
+{
+	size_t size;
+	int rc;
+
+	if (!imsic_acpi_data.nr_rintc)
+		return -ENODEV;
+
+	size = sizeof(*imsic_acpi_data.mmio) * imsic_acpi_data.nr_rintc;
+	imsic_acpi_data.mmio = kzalloc(size, GFP_KERNEL);
+	if (!imsic_acpi_data.mmio) {
+		return -ENOMEM;
+	}
+
+	rc = imsic_acpi_collect_imsic_info();
+	if(rc) {
+		kfree(imsic_acpi_data.mmio);
+		return rc;
+	}
+
+	return 0;
+}
+
+static struct fwnode_handle *riscv_get_imsic_fwnode(struct device *dev)
+{
+	return imsic_fwnode;
+}
+
+static u32 __init imsic_acpi_nr_parent_irq(struct fwnode_handle *fwnode,
+					 void *fwopaque)
+{
+	return imsic_acpi_data.nr_rintc;
+}
+
+static int __init imsic_acpi_parent_hartid(struct fwnode_handle *fwnode,
+					 void *fwopaque, u32 index,
+					 unsigned long *out_hartid)
+{
+	*out_hartid = acpi_get_madt_rintc(index)->hartid;
+	return 0;
+}
+
+static u32 __init imsic_acpi_nr_mmio(struct fwnode_handle *fwnode,
+				   void *fwopaque)
+{
+	return imsic_acpi_data.nr_rintc;
+}
+
+static int __init imsic_acpi_mmio_to_resource(struct fwnode_handle *fwnode,
+					      void *fwopaque, u32 index,
+					      struct resource *res)
+{
+	if (!res)
+		return -ENOMEM;
+
+	res->start = imsic_acpi_data.mmio[index].base;
+	res->end = imsic_acpi_data.mmio[index].base +
+		   imsic_acpi_data.mmio[index].size - 1;
+	res->flags = IORESOURCE_MEM;
+
+	return 0;
+}
+
+static void __iomem __init *imsic_acpi_mmio_map(struct fwnode_handle *fwnode,
+					      void *fwopaque, u32 index)
+{
+	return ioremap(imsic_acpi_data.mmio[index].base,
+		       imsic_acpi_data.mmio[index].size);
+}
+
+static int __init imsic_acpi_read_u32(struct fwnode_handle *fwnode,
+				    void *fwopaque, const char *prop,
+				    u32 *out_val)
+{
+	struct acpi_madt_imsic *imsic;
+
+	imsic = (struct acpi_madt_imsic *)fwopaque;
+
+	if (!strcmp(prop, "riscv,guest-index-bits")) {
+		*out_val = imsic->guest_index_bits;
+		return 0;
+	} else if (!strcmp(prop, "riscv,hart-index-bits")) {
+		*out_val = imsic->hart_index_bits;
+		return 0;
+	} else if (!strcmp(prop, "riscv,group-index-bits")) {
+		*out_val = imsic->group_index_bits;
+		return 0;
+	} else if (!strcmp(prop, "riscv,group-index-shift")) {
+		*out_val = imsic->group_index_shift;
+		return 0;
+	} else if (!strcmp(prop, "riscv,num-ids")) {
+		*out_val = imsic->num_ids;
+		return 0;
+	} else if (!strcmp(prop, "riscv,num-guest-ids")) {
+		*out_val = imsic->num_guest_ids;
+		return 0;
+	} else {
+		return -1;
+	}
+}
+
+static bool __init imsic_acpi_read_bool(struct fwnode_handle *fwnode,
+					void *fwopaque, const char *prop)
+{
+	struct acpi_madt_imsic *imsic;
+
+	imsic = (struct acpi_madt_imsic *)fwopaque;
+
+	return (imsic->flags & IMSIC_FLAGS_SLOW_IPI) ? TRUE: FALSE;
+}
+
+static int __init imsic_acpi_init(union acpi_subtable_headers *header,
+				  const unsigned long end)
+{
+	int rc;
+	struct imsic_fwnode_ops ops = {
+		.nr_parent_irq = imsic_acpi_nr_parent_irq,
+		.parent_hartid = imsic_acpi_parent_hartid,
+		.nr_mmio = imsic_acpi_nr_mmio,
+		.mmio_to_resource = imsic_acpi_mmio_to_resource,
+		.mmio_map = imsic_acpi_mmio_map,
+		.read_u32 = imsic_acpi_read_u32,
+		.read_bool = imsic_acpi_read_bool,
+	};
+
+	rc = imsic_acpi_init_imsic_mmio();
+	if (rc)
+		return rc;
+
+	imsic_fwnode = irq_domain_alloc_named_fwnode("RISCV-IMSIC");
+	if (!imsic_fwnode) {
+		rc = -ENOMEM;
+		kfree(imsic_acpi_data.mmio);
+		return -rc;
+	}
+	rc = imsic_init(&ops, imsic_fwnode, header);
+	if (rc) {
+		kfree(imsic_acpi_data.mmio);
+		irq_domain_free_fwnode(imsic_fwnode);
+		imsic_fwnode = NULL;
+		return -rc;
+	}
+
+	platform_msi_register_fwnode_provider(&riscv_get_imsic_fwnode);
+
+	pci_msi_register_fwnode_provider(&riscv_get_imsic_fwnode);
+
+	return 0;
+}
+
+IRQCHIP_ACPI_DECLARE(riscv_imsic, ACPI_MADT_TYPE_IMSIC,
+		     acpi_validate_rintc, 1, imsic_acpi_init);
+
+#endif
