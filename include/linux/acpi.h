@@ -1497,4 +1497,10 @@ static inline void acpi_device_notify(struct device *dev) { }
 static inline void acpi_device_notify_remove(struct device *dev) { }
 #endif
 
+#ifdef CONFIG_RISCV
+void acpi_arch_device_init(void);
+#else
+static inline void acpi_arch_device_init(void) { }
+#endif
+
 #endif	/*_LINUX_ACPI_H*/

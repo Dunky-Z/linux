@@ -114,4 +114,17 @@
 
 #define APLIC_IDC_CLAIMI		0x1c
 
+#ifdef CONFIG_ACPI
+#define MAX_APLICS			16
+#endif
+
+#ifdef CONFIG_ACPI
+struct aplic_plat_data {
+	u32 nr_idcs;
+	u32 gsi_base;
+	u16 nr_irqs;
+	u8  aplic_id;
+};
+#endif
+
 #endif
