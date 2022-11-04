@@ -4,6 +4,7 @@
  * Copyright (C) 2022 Ventana Micro Systems Inc.
  */
 
+#include <linux/acpi.h>
 #include <linux/bitops.h>
 #include <linux/cpu.h>
 #include <linux/interrupt.h>
@@ -50,7 +51,17 @@ struct aplic_priv {
 	struct irq_domain	*irqdomain;
 	struct aplic_msicfg	msicfg;
 	struct cpumask		lmask;
+#ifdef CONFIG_ACPI
+	u32			aplic_id;
+	u32			gsi_base;
+#endif
 };
+
+#ifdef CONFIG_ACPI
+static struct aplic_priv *cached_aplic_priv[MAX_APLICS];
+static struct fwnode_handle *cached_aplic_handle[MAX_APLICS];
+static u8 nr_aplics;
+#endif
 
 static unsigned int aplic_idc_parent_irq;
 static DEFINE_PER_CPU(struct aplic_idc, aplic_idcs);
@@ -158,22 +169,48 @@ static struct irq_chip aplic_chip = {
 			  IRQCHIP_MASK_ON_SUSPEND,
 };
 
-static int aplic_irqdomain_translate(struct irq_domain *d,
-				     struct irq_fwspec *fwspec,
-				     unsigned long *hwirq,
-				     unsigned int *type)
+static int aplic_irqdomain_common_translate(struct aplic_priv *priv,
+					    struct irq_fwspec *fwspec,
+					    unsigned long *hwirq,
+					    unsigned int *type)
 {
+	struct device_node *of_node;
+
 	if (WARN_ON(fwspec->param_count < 2))
 		return -EINVAL;
 	if (WARN_ON(!fwspec->param[0]))
 		return -EINVAL;
 
-	*hwirq = fwspec->param[0];
+	of_node = to_of_node(fwspec->fwnode);
+	if(!of_node) {
+		*hwirq = fwspec->param[0] - priv->gsi_base;
+	} else {
+		*hwirq = fwspec->param[0];
+	}
 	*type = fwspec->param[1] & IRQ_TYPE_SENSE_MASK;
 
 	WARN_ON(*type == IRQ_TYPE_NONE);
 
 	return 0;
+}
+static int aplic_irqdomain_msi_translate(struct irq_domain *d,
+					 struct irq_fwspec *fwspec,
+					 unsigned long *hwirq,
+					 unsigned int *type)
+{
+	struct aplic_priv *priv = platform_msi_get_host_data(d);
+
+	return aplic_irqdomain_common_translate(priv, fwspec, hwirq, type);
+}
+
+static int aplic_irqdomain_idc_translate(struct irq_domain *d,
+					 struct irq_fwspec *fwspec,
+					 unsigned long *hwirq,
+					 unsigned int *type)
+{
+	struct aplic_priv *priv = d->host_data;
+
+	return aplic_irqdomain_common_translate(priv, fwspec, hwirq, type);
 }
 
 static int aplic_irqdomain_msi_alloc(struct irq_domain *domain,
@@ -186,7 +223,7 @@ static int aplic_irqdomain_msi_alloc(struct irq_domain *domain,
 	struct irq_fwspec *fwspec = arg;
 	struct aplic_priv *priv = platform_msi_get_host_data(domain);
 
-	ret = aplic_irqdomain_translate(domain, fwspec, &hwirq, &type);
+	ret = aplic_irqdomain_msi_translate(domain, fwspec, &hwirq, &type);
 	if (ret)
 		return ret;
 
@@ -202,7 +239,7 @@ static int aplic_irqdomain_msi_alloc(struct irq_domain *domain,
 }
 
 static const struct irq_domain_ops aplic_irqdomain_msi_ops = {
-	.translate	= aplic_irqdomain_translate,
+	.translate	= aplic_irqdomain_msi_translate,
 	.alloc		= aplic_irqdomain_msi_alloc,
 	.free		= platform_msi_device_domain_free,
 };
@@ -217,7 +254,7 @@ static int aplic_irqdomain_idc_alloc(struct irq_domain *domain,
 	struct irq_fwspec *fwspec = arg;
 	struct aplic_priv *priv = domain->host_data;
 
-	ret = aplic_irqdomain_translate(domain, fwspec, &hwirq, &type);
+	ret = aplic_irqdomain_idc_translate(domain, fwspec, &hwirq, &type);
 	if (ret)
 		return ret;
 
@@ -232,7 +269,7 @@ static int aplic_irqdomain_idc_alloc(struct irq_domain *domain,
 }
 
 static const struct irq_domain_ops aplic_irqdomain_idc_ops = {
-	.translate	= aplic_irqdomain_translate,
+	.translate	= aplic_irqdomain_idc_translate,
 	.alloc		= aplic_irqdomain_idc_alloc,
 	.free		= irq_domain_free_irqs_top,
 };
@@ -481,21 +518,30 @@ static int aplic_setup_idc(struct aplic_priv *priv)
 
 	/* Setup per-CPU IDC and target CPU mask */
 	for (i = 0; i < priv->nr_idcs; i++) {
-		if (of_irq_parse_one(node, i, &parent)) {
-			dev_err(dev, "failed to parse parent for IDC%d.\n",
-				i);
-			return -EIO;
-		}
+		if(acpi_disabled) {
+			if (of_irq_parse_one(node, i, &parent)) {
+				dev_err(dev, "failed to parse parent for IDC%d.\n",
+					i);
+				return -EIO;
+			}
 
-		/* Skip IDCs which do not connect to external interrupts */
-		if (parent.args[0] != RV_IRQ_EXT)
-			continue;
+			/* Skip IDCs which do not connect to external interrupts */
+			if (parent.args[0] != RV_IRQ_EXT)
+				continue;
 
-		rc = riscv_of_parent_hartid(parent.np, &hartid);
-		if (rc) {
-			dev_err(dev, "failed to parse hart ID for IDC%d.\n",
-				i);
-			return rc;
+			rc = riscv_of_parent_hartid(parent.np, &hartid);
+			if (rc) {
+				dev_err(dev, "failed to parse hart ID for IDC%d.\n",
+					i);
+				return rc;
+			}
+		} else {
+			rc = acpi_get_aplic_parent_hartid(priv->aplic_id, i, &hartid);
+			if (rc) {
+				dev_err(dev, "failed to parse hart ID for IDC%d.\n",
+					i);
+				return rc;
+			}
 		}
 
 		cpu = riscv_hartid_to_cpuid(hartid);
@@ -555,9 +601,48 @@ static int aplic_setup_idc(struct aplic_priv *priv)
 	return (setup_count) ? 0 : -ENODEV;
 }
 
+#ifdef CONFIG_ACPI
+static int find_aplic(u32 gsi)
+{
+        int i;
+
+        /* Find the APLIC that manages this GSI. */
+        for (i = 0; i < nr_aplics; i++) {
+                struct aplic_priv *priv = cached_aplic_priv[i];
+
+                if (!priv)
+                        return -1;
+
+                if (gsi >= priv->gsi_base && gsi < (priv->gsi_base + priv->nr_irqs))
+                        return i;
+        }
+
+        pr_err("ERROR: Unable to locate APLIC for GSI %d\n", gsi);
+        return -1;
+}
+
+static u32 aplic_gsi_to_irq(u32 gsi)
+{
+	return acpi_register_gsi(NULL, gsi, ACPI_LEVEL_SENSITIVE, ACPI_ACTIVE_HIGH);
+}
+
+static struct fwnode_handle *aplic_get_gsi_domain_id(u32 gsi)
+{
+	int id;
+	struct fwnode_handle *domain_handle = NULL;
+
+	id = find_aplic(gsi);
+	if (id >= 0 && cached_aplic_handle[id])
+		domain_handle = cached_aplic_handle[id];
+
+	return domain_handle;
+}
+#endif
+
 static int aplic_probe(struct platform_device *pdev)
 {
 	struct device_node *node = pdev->dev.of_node;
+	struct aplic_plat_data *plat_data;
 	struct device *dev = &pdev->dev;
 	struct aplic_priv *priv;
 	struct resource *regs;
@@ -582,7 +667,16 @@ static int aplic_probe(struct platform_device *pdev)
 		return -EIO;
 	}
 
-	of_property_read_u32(node, "riscv,num-sources", &priv->nr_irqs);
+	if (IS_ENABLED(CONFIG_OF) && node) {
+		of_property_read_u32(node, "riscv,num-sources", &priv->nr_irqs);
+		priv->nr_idcs = of_irq_count(node);
+	} else {
+		plat_data = (struct aplic_plat_data *)dev_get_platdata(&pdev->dev);
+		priv->nr_idcs = plat_data->nr_idcs;
+		priv->nr_irqs = plat_data->nr_irqs;
+		priv->gsi_base = plat_data->gsi_base;
+		priv->aplic_id = plat_data->aplic_id;
+	}
 	if (!priv->nr_irqs) {
 		dev_err(dev, "failed to get number of interrupt sources\n");
 		return -EINVAL;
@@ -592,7 +686,6 @@ static int aplic_probe(struct platform_device *pdev)
 	aplic_init_hw_irqs(priv);
 
 	/* Setup IDCs or MSIs based on parent interrupts in DT node */
-	priv->nr_idcs = of_irq_count(node);
 	if (priv->nr_idcs)
 		rc = aplic_setup_idc(priv);
 	else
@@ -606,7 +699,7 @@ static int aplic_probe(struct platform_device *pdev)
 	/* Create irq domain instance for the APLIC */
 	if (priv->nr_idcs)
 		priv->irqdomain = irq_domain_create_linear(
-						of_node_to_fwnode(node),
+						dev_fwnode(dev),
 						priv->nr_irqs + 1,
 						&aplic_irqdomain_idc_ops,
 						priv);
@@ -620,6 +713,16 @@ static int aplic_probe(struct platform_device *pdev)
 		dev_err(dev, "failed to add irq domain\n");
 		return -ENOMEM;
 	}
+
+#ifdef CONFIG_ACPI
+	if (!acpi_disabled) {
+		acpi_set_irq_model(ACPI_IRQ_MODEL_APLIC, aplic_get_gsi_domain_id);
+		acpi_set_gsi_to_irq_fallback(aplic_gsi_to_irq);
+	}
+
+	cached_aplic_handle[nr_aplics] = dev->fwnode;
+	cached_aplic_priv[nr_aplics++] = priv;
+#endif
 
 	/* Advertise the interrupt controller */
 	if (priv->nr_idcs) {
