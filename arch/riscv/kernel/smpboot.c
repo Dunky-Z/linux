@@ -91,6 +91,23 @@ struct acpi_madt_rintc *acpi_cpu_get_madt_rintc(int cpu)
 	return NULL;
 }
 
+int acpi_get_aplic_parent_hartid(u32 aplic_id, int idx, unsigned long *hartid)
+{
+	int cpu, i = 0;;
+
+	for_each_possible_cpu(cpu) {
+		if (cpu_madt_rintc[cpu].aplic_id == aplic_id) {
+			if (i == idx) {
+				*hartid = cpu_madt_rintc[cpu].hartid;
+				return 0;
+			}
+			i++;
+		}
+	}
+
+	return -1;
+}
+
 static int __init
 acpi_parse_rintc(union acpi_subtable_headers *header,
 			     const unsigned long end)
