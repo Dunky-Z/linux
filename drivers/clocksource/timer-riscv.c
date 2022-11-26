@@ -10,6 +10,7 @@
 
 #define pr_fmt(fmt) "riscv-timer: " fmt
 
+#include <linux/acpi.h>
 #include <linux/clocksource.h>
 #include <linux/clockchips.h>
 #include <linux/cpu.h>
@@ -224,3 +225,16 @@ static int __init riscv_timer_init_dt2(struct device_node *n)
 	return riscv_timer_init_common();
 }
 TIMER_OF_DECLARE(riscv_timer2, "riscv,timer", riscv_timer_init_dt2);
+
+#ifdef CONFIG_ACPI
+static int __init riscv_timer_acpi_init(struct acpi_table_header *table)
+{
+	struct acpi_table_rhct *rhct;
+
+	rhct = container_of(table, struct acpi_table_rhct, header);
+	riscv_timebase = rhct->timebase_freq;
+
+	return riscv_timer_init_common();
+}
+TIMER_ACPI_DECLARE(riscv_timer_acpi, ACPI_SIG_RHCT, riscv_timer_acpi_init);
+#endif
